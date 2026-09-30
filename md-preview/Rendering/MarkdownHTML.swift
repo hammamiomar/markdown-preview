@@ -351,6 +351,7 @@ nonisolated enum MarkdownHTML {
         /* Keep vertical gestures on the page: overflow-x:auto otherwise makes
            overflow-y:auto, and even 1px of article overflow can swallow a wheel gesture. */
         article.markdown-body { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; overflow-wrap: anywhere; }
+        article.markdown-body table { overflow-wrap: normal; }
         </style>
         """ : ""
         let contentWidthOverride: String
