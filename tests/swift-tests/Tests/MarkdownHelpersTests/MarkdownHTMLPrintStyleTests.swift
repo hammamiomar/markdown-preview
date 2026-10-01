@@ -86,7 +86,6 @@ final class MarkdownHTMLPrintStyleTests: XCTestCase {
 
         XCTAssertFalse(css.contains("font-size"))
         XCTAssertFalse(css.contains("max-width"))
-        XCTAssertFalse(css.contains("overflow-wrap"))
         XCTAssertFalse(css.contains("color-scheme"))
     }
 

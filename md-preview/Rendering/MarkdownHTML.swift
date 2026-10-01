@@ -193,12 +193,12 @@ nonisolated enum MarkdownHTML {
     /// print pipeline paginates the same read-only page shown on screen.
     static let previewPrintClass = "md-preview-print-fidelity"
 
-    /// The only export-specific print adjustments are mechanical: move the
-    /// read-only page padding into a real page margin so every PDF page gets
-    /// the same gutters, retain the same content measure, and paint the
-    /// otherwise-transparent WebKit page with the active Canvas color. The
-    /// print operation then fits that complete column to the selected paper
-    /// instead of reflowing it at the narrower print viewport.
+    /// Export-specific print adjustments move the read-only page padding
+    /// into a real page margin so every PDF page gets the same gutters,
+    /// retain the same content measure, and paint the otherwise-transparent
+    /// WebKit page with the active Canvas color. The print operation then
+    /// fits that complete column to the selected paper instead of reflowing
+    /// it at the narrower print viewport. Table words wrap to avoid clipping.
     static let previewPrintOverrideCSS = """
     @media print {
         @page {
@@ -212,6 +212,11 @@ nonisolated enum MarkdownHTML {
             box-sizing: border-box;
             width: \(contentColumnWidth)px;
             padding: 0;
+        }
+        /* Wrap long table words so they are not clipped in the PDF. */
+        html.\(previewPrintClass) th,
+        html.\(previewPrintClass) td {
+            overflow-wrap: anywhere;
         }
         /* The figure clips an absolutely-positioned stage, so a page break
            through it discards everything past the break. */

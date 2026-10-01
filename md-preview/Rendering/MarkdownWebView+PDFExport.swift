@@ -866,9 +866,8 @@ extension MarkdownWebView {
     }
 
     /// Marks the live page so its paper-only CSS does not replace the
-    /// read-only typography, width, spacing, wrapping, or active palette.
-    /// WebKit still paginates it, but the pixels sent into that pagination are
-    /// the same ones the preview renderer owns.
+    /// read-only typography, width, spacing, or active palette.
+    /// Table words wrap to fit the exported page.
     private func applyPreviewPrintMode(completion: (() -> Void)? = nil) {
         let script = """
         (() => {
