@@ -7,13 +7,11 @@
 //
 
 import Cocoa
-import PDFKit
 import os
 import UniformTypeIdentifiers
 import WebKit
 
 private let printSizeStyleElementID = "md-print-size"
-private let previewPrintStyleElementID = "md-preview-print-style"
 
 private enum DocumentExportFormat: String, CaseIterable {
     case pdf
@@ -64,8 +62,7 @@ private struct FileExportSource {
     let markdown: String
     let sourceURL: URL?
     let assetBaseURL: URL?
-    /// Supplied by `MarkdownWebView`, which owns the live page PNG is captured
-    /// from. Reports `nil` on success.
+    /// Reports nil after the image has been saved.
     let writePNG: (URL, @escaping (Error?) -> Void) -> Void
 
     func writeHTML(to url: URL) throws {
@@ -752,7 +749,7 @@ extension MarkdownWebView {
     /// `NSPrintOperation.run()` must never be used with a WKWebView: WebKit
     /// computes pagination asynchronously, so the synchronous path never learns
     /// the page count and can emit pages without bound. Only `runModal` is safe.
-    private func makePrintOperation(jobTitle: String) -> NSPrintOperation {
+    private func makePrintOperation(for webView: WKWebView, jobTitle: String) -> NSPrintOperation {
         let printInfo = NSPrintInfo.shared.copy() as? NSPrintInfo ?? NSPrintInfo()
         printInfo.horizontalPagination = .fit
         printInfo.verticalPagination = .automatic
@@ -768,12 +765,14 @@ extension MarkdownWebView {
     }
 
     private func configuredPrintOperation(
+        for webView: WKWebView,
         from window: NSWindow,
         panel: ExportPrintPanel? = nil
     ) -> NSPrintOperation {
         // The PDF save panel seeds its filename from the job title, so a window
         // titled "notes.md" would otherwise produce "notes.md.pdf".
         let operation = makePrintOperation(
+            for: webView,
             jobTitle: (window.title as NSString).deletingPathExtension)
         if let panel {
             operation.printPanel = panel
@@ -797,47 +796,25 @@ extension MarkdownWebView {
     /// re-rendered with mermaid's light theme.
     private static let paperPrintMermaidTheme = "default"
 
-    private func runPrintOperation(
-        _ operation: NSPrintOperation,
-        from window: NSWindow,
-        matchesPreview: Bool = false
-    ) {
-        // Export keeps the live read-only stylesheet intact. Regular Print
-        // retains its paper-oriented size and pagination controls, forces the
-        // light palette, and restores the on-screen theme when the panel ends.
-        if matchesPreview {
-            renderAllMermaidDiagrams {
-                self.applyPreviewPrintMode {
-                    operation.runModal(
-                        for: window,
-                        delegate: nil,
-                        didRun: nil,
-                        contextInfo: nil
-                    )
-                }
-            }
-        } else {
-            renderAllMermaidDiagrams(forcedTheme: Self.paperPrintMermaidTheme) {
-                self.applyPaperPrintMode {
-                    self.applyPrintPointSize(PrintSizeOptions.pointSize) {
-                        operation.runModal(
-                            for: window,
-                            delegate: self,
-                            didRun: #selector(Self.paperPrintOperationDidRun(_:success:contextInfo:)),
-                            contextInfo: nil
-                        )
-                    }
-                }
+    private func runPrintOperation(_ operation: NSPrintOperation, from window: NSWindow) {
+        renderAllMermaidDiagrams(forcedTheme: Self.paperPrintMermaidTheme) {
+            self.applyPrintPointSize(PrintSizeOptions.pointSize) {
+                operation.runModal(
+                    for: window,
+                    delegate: self,
+                    didRun: #selector(Self.paperPrintOperationDidRun(_:success:contextInfo:)),
+                    contextInfo: nil
+                )
             }
         }
     }
 
-    @objc private func paperPrintOperationDidRun(
+    @objc nonisolated private func paperPrintOperationDidRun(
         _ operation: NSPrintOperation,
         success: Bool,
         contextInfo: UnsafeMutableRawPointer?
     ) {
-        renderAllMermaidDiagrams {}
+        Task { @MainActor in self.renderAllMermaidDiagrams {} }
     }
 
     /// Mermaid renders lazily as figures scroll into view, but pagination
@@ -863,65 +840,6 @@ extension MarkdownWebView {
             }
             completion()
         }
-    }
-
-    /// Marks the live page so its paper-only CSS does not replace the
-    /// read-only typography, width, spacing, or active palette.
-    /// Table words wrap to fit the exported page.
-    private func applyPreviewPrintMode(completion: (() -> Void)? = nil) {
-        let script = """
-        (() => {
-            document.documentElement.classList.add(
-                '\(MarkdownHTML.previewPrintClass)'
-            );
-            document.getElementById('\(printSizeStyleElementID)')?.remove();
-            let style = document.getElementById('\(previewPrintStyleElementID)');
-            if (!style) {
-                style = document.createElement('style');
-                style.id = '\(previewPrintStyleElementID)';
-                document.head.appendChild(style);
-            }
-            style.textContent = \(Self.javaScriptStringLiteral(
-                MarkdownHTML.previewPrintOverrideCSS
-            ));
-            return true;
-        })()
-        """
-        evaluatePrintSetupScript(script, label: "preview print mode", completion: completion)
-    }
-
-    private func applyPaperPrintMode(completion: (() -> Void)? = nil) {
-        let script = """
-        (() => {
-            document.documentElement.classList.remove(
-                '\(MarkdownHTML.previewPrintClass)'
-            );
-            document.getElementById('\(previewPrintStyleElementID)')?.remove();
-            return true;
-        })()
-        """
-        evaluatePrintSetupScript(script, label: "paper print mode", completion: completion)
-    }
-
-    private func evaluatePrintSetupScript(
-        _ script: String,
-        label: String,
-        completion: (() -> Void)?
-    ) {
-        webView.evaluateJavaScript(script) { _, error in
-            if let error {
-                Logger.perf.debug(
-                    "\(label, privacy: .public) setup failed: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-            completion?()
-        }
-    }
-
-    private nonisolated static func javaScriptStringLiteral(_ value: String) -> String {
-        let data = try? JSONSerialization.data(withJSONObject: [value])
-        let array = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
-        return String(array.dropFirst().dropLast())
     }
 
     /// Sets the printed body size by injecting a print-only rule into the
@@ -997,117 +915,47 @@ extension MarkdownWebView {
         initialFormat: DocumentExportFormat?,
         from window: NSWindow
     ) {
-        let source = FileExportSource(
-            markdown: markdown,
-            sourceURL: sourceURL,
-            assetBaseURL: assetBaseURL,
-            writePNG: { [weak self] url, completion in
-                self?.writePNG(to: url, completion: completion)
+        Task {
+            var session: DocumentExportSession?
+            do {
+                let configuration = WKWebViewConfiguration()
+                let assets = MarkdownAssetScheme()
+                assets.setBaseURL(assetBaseURL)
+                configuration.setURLSchemeHandler(assets, forURLScheme: MarkdownAssetScheme.scheme)
+                let export = try await DocumentExportSession.capture(from: webView, configuration: configuration)
+                session = export
+                let exportView = try await export.webView(for: .pdf)
+                let source = FileExportSource(
+                    markdown: markdown,
+                    sourceURL: sourceURL,
+                    assetBaseURL: assetBaseURL,
+                    writePNG: { url, completion in
+                        Task {
+                            do {
+                                try await export.writePNG(to: url)
+                                completion(nil)
+                            } catch {
+                                completion(error)
+                            }
+                        }
+                    }
+                )
+                let panel = ExportPrintPanel(fileExportSource: source, initialFormat: initialFormat)
+                let operation = configuredPrintOperation(for: exportView, from: window, panel: panel)
+                prepareForPanelDrivenExport(operation)
+                _ = await export.runPrintOperation(operation, from: window)
+            } catch {
+                session?.close()
+                window.presentError(error)
             }
-        )
-        let panel = ExportPrintPanel(
-            fileExportSource: source,
-            initialFormat: initialFormat
-        )
-        let operation = configuredPrintOperation(from: window, panel: panel)
-        prepareForPanelDrivenExport(operation)
-        runPrintOperation(operation, from: window, matchesPreview: true)
-    }
-
-    /// Rasterises the document to a single tall PNG. `createPDF` captures the
-    /// whole scrollable page as one unpaginated sheet, so no page breaks cut
-    /// through the content, and it renders screen media — the image keeps the
-    /// on-screen palette rather than the print stylesheet's forced light one.
-    private func writePNG(to url: URL, completion: @escaping (Error?) -> Void) {
-        webView.createPDF(configuration: WKPDFConfiguration()) { result in
-            switch result {
-            case .failure(let error):
-                completion(error)
-            case .success(let data):
-                do {
-                    try Self.writePNG(fromPDF: data, to: url)
-                    completion(nil)
-                } catch {
-                    completion(error)
-                }
-            }
         }
-    }
-
-    private static func writePNG(fromPDF data: Data, to url: URL) throws {
-        guard let document = PDFDocument(data: data), document.pageCount > 0 else {
-            throw exportError("The document could not be rendered as an image.")
-        }
-
-        // 2x so the result stays sharp on Retina displays and when zoomed.
-        let scale: CGFloat = 2
-        let pages = (0..<document.pageCount).compactMap { document.page(at: $0) }
-        let bounds = pages.map { $0.bounds(for: .mediaBox) }
-        let width = bounds.map(\.width).max() ?? 0
-        let height = bounds.map(\.height).reduce(0, +)
-        guard width > 0, height > 0 else {
-            throw exportError("The document could not be rendered as an image.")
-        }
-
-        let pixelWidth = Int((width * scale).rounded())
-        let pixelHeight = Int((height * scale).rounded())
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixelWidth,
-            pixelsHigh: pixelHeight,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else {
-            throw exportError("The image could not be allocated.")
-        }
-        rep.size = NSSize(width: width, height: height)
-
-        NSGraphicsContext.saveGraphicsState()
-        defer { NSGraphicsContext.restoreGraphicsState() }
-        guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
-            throw exportError("The image could not be allocated.")
-        }
-        NSGraphicsContext.current = context
-        let cgContext = context.cgContext
-        cgContext.scaleBy(x: scale, y: scale)
-        NSColor.white.setFill()
-        NSRect(x: 0, y: 0, width: width, height: height).fill()
-
-        // PDF origin is bottom-left, so stack downward from the top edge.
-        var offsetY = height
-        for (page, pageBounds) in zip(pages, bounds) {
-            offsetY -= pageBounds.height
-            cgContext.saveGState()
-            cgContext.translateBy(x: 0, y: offsetY)
-            page.draw(with: .mediaBox, to: cgContext)
-            cgContext.restoreGState()
-        }
-
-        guard let png = rep.representation(using: .png, properties: [:]) else {
-            throw exportError("The image could not be encoded.")
-        }
-        try png.write(to: url)
-    }
-
-    private static func exportError(_ message: String) -> NSError {
-        NSError(
-            domain: "doc.md-preview.export",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: NSLocalizedString(
-                message, comment: "PNG export failure")]
-        )
     }
 
     /// File ▸ Print… — the system print panel, with the font size in a
     /// "Markdown Preview" accessory pane so the panel's own live page
     /// thumbnails preview the choice.
     func printDocument(from window: NSWindow) {
-        let operation = configuredPrintOperation(from: window)
+        let operation = configuredPrintOperation(for: webView, from: window)
         runPrintOperation(operation, from: window)
     }
 
