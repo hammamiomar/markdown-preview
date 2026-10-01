@@ -1474,8 +1474,8 @@ final class MarkdownWebView: NSView, WKNavigationDelegate {
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            activateLink(url)
             decisionHandler(.cancel)
+            activateLink(url)
             return
         }
         decisionHandler(.allow)
@@ -1498,7 +1498,7 @@ final class MarkdownWebView: NSView, WKNavigationDelegate {
                     NSWorkspace.shared.open(resolved)
                 }
             } else if url.scheme != MarkdownAssetScheme.scheme {
-                NSWorkspace.shared.open(url)
+                ExternalLinkOpener.open(url, window: window)
             }
     }
 
@@ -1510,7 +1510,8 @@ final class MarkdownWebView: NSView, WKNavigationDelegate {
                   let file = MarkdownAssetResolution.fileURL(for: source) else { return }
             target = Self.reattachingFragment(of: source, to: file)
         } else {
-            guard ["https", "http", "mailto", "file"].contains(source.scheme?.lowercased() ?? "") else { return }
+            guard ["https", "http", "mailto", "file"].contains(source.scheme?.lowercased() ?? "")
+                || ExternalLinkPolicy.isExternal(source) else { return }
             target = source
         }
         let menu = NSMenu()

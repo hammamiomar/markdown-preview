@@ -510,6 +510,20 @@ nonisolated extension MarkdownHTML {
         // ALLOWED_URI_REGEXP extends DOMPurify's default safe-URL list with
         // `md-asset:` so markdown image references that resolve to the
         // document's base directory (![alt](relative/path.png)) keep working.
+        // Preserve external destinations only on HTML anchors. Keeping the
+        // normal URI policy keeps app schemes out of src, SVG href, etc.
+        if (typeof DOMPurify !== 'undefined' && DOMPurify.addHook) {
+            const blockedLinkScheme = /^(?:\(ExternalLinkPolicy.blockedSchemes.joined(separator: "|"))):/i;
+            const externalLinkScheme = /^[a-z][a-z0-9+.-]*:/i;
+            DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+                if (node.namespaceURI === 'http://www.w3.org/1999/xhtml'
+                    && node.nodeName === 'A' && data.attrName === 'href'
+                    && externalLinkScheme.test(data.attrValue)
+                    && !blockedLinkScheme.test(data.attrValue)) {
+                    data.forceKeepAttr = true;
+                }
+            });
+        }
         const SANITIZE_CONFIG = {
             FORBID_TAGS: ['style', 'form', 'iframe', 'object',
                           'embed', 'meta', 'link', 'base'],
