@@ -4,20 +4,36 @@ import WebKit
 
 @MainActor
 final class DocumentExportSession {
-    enum Format { case pdf, png }
+    enum Format { case pdf, png, paper }
+
+    private struct PaperLayout: Equatable {
+        let width: CGFloat
+        let pointSize: Int
+
+        init(info: NSPrintInfo, pointSize: Int) {
+            let points = info.paperSize.width - 2 * MarkdownHTML.printPageMarginSidePoints
+            width = points * 96 / 72
+            self.pointSize = pointSize
+        }
+    }
 
     private let html: String
+    private let mermaidSources: [String]
     private let baseURL: URL?
     private let previewSize: NSSize
     private let previewZoom: CGFloat
     private let appearance: NSAppearance
     private let configuration: WKWebViewConfiguration
     private var pages: [Format: ExportPage] = [:]
+    private var paperLayout: PaperLayout?
+    private var paperPreparation: Task<WKWebView, Error>?
     private var printCompletion: ExportPrintCompletion?
     private(set) var isClosed = false
 
-    private init(html: String, source: WKWebView, configuration: WKWebViewConfiguration) {
+    private init(html: String, mermaidSources: [String], source: WKWebView,
+                 configuration: WKWebViewConfiguration) {
         self.html = html
+        self.mermaidSources = mermaidSources
         baseURL = source.url
         previewSize = source.bounds.size
         previewZoom = source.pageZoom
@@ -33,36 +49,89 @@ final class DocumentExportSession {
             await window.MdPreview?.mermaidRenderAll?.();
             await document.fonts.ready;
             const copy = document.documentElement.cloneNode(true);
-            copy.querySelectorAll('script, #md-print-size').forEach(node => node.remove());
+            copy.querySelectorAll('script').forEach(node => node.remove());
             const checkboxes = document.querySelectorAll('input[type="checkbox"]');
             copy.querySelectorAll('input[type="checkbox"]').forEach((box, index) => {
                 box.toggleAttribute('checked', checkboxes[index].checked);
             });
-            return '<!DOCTYPE html>' + copy.outerHTML;
+            return {
+                html: '<!DOCTYPE html>' + copy.outerHTML,
+                mermaidSources: Array.from(document.querySelectorAll('.mermaid'),
+                    node => node.__mdSrc || node.textContent)
+            };
             """, in: nil, contentWorld: .page)
-        guard let html = result as? String else {
+        guard let snapshot = result as? [String: Any],
+              let html = snapshot["html"] as? String,
+              let sources = snapshot["mermaidSources"] as? [String] else {
             throw exportError("The document could not be prepared for export.")
         }
         configuration.preferences = source.configuration.preferences
         configuration.websiteDataStore = source.configuration.websiteDataStore
-        return DocumentExportSession(html: html, source: source, configuration: configuration)
+        return DocumentExportSession(html: html, mermaidSources: sources,
+                                     source: source, configuration: configuration)
     }
 
     func webView(for format: Format) async throws -> WKWebView {
+        if format == .paper {
+            return try await preparePaper(using: NSPrintInfo.shared, pointSize: MarkdownHTML.defaultPrintPointSize)
+        }
+        return try await page(for: format).webView
+    }
+
+    func preparePaper(using info: NSPrintInfo, pointSize: Int) async throws -> WKWebView {
         guard !isClosed else { throw CancellationError() }
-        if let page = pages[format] { return page.webView }
-        let size = format == .pdf
-            ? NSSize(width: MarkdownHTML.preferredPageWidth, height: previewSize.height)
-            : previewSize
+        let layout = PaperLayout(info: info, pointSize: pointSize)
+        guard layout.width.isFinite, layout.width > 0 else {
+            throw Self.exportError("The selected paper has no printable area.")
+        }
+        if paperLayout == layout, let paperPreparation {
+            return try await paperPreparation.value
+        }
+        let previous = paperPreparation
+        let preparation = Task {
+            // Finish an in-flight layout before applying the next settings.
+            _ = try? await previous?.value
+            try Task.checkCancellation()
+            let page = try await self.page(for: .paper)
+            guard !self.isClosed else { throw CancellationError() }
+            page.webView.setFrameSize(NSSize(width: layout.width, height: self.previewSize.height))
+            _ = try await page.webView.callAsyncJavaScript("""
+                document.body.style.width = width + 'px';
+                document.body.style.fontSize = pointSize + 'pt';
+                await document.fonts.ready;
+                \(ExportTableLayout.prepareScript)
+                """, arguments: ["width": layout.width, "pointSize": layout.pointSize],
+                in: nil, contentWorld: .page)
+            try Task.checkCancellation()
+            guard !self.isClosed else { throw CancellationError() }
+            return page.webView
+        }
+        paperLayout = layout
+        paperPreparation = preparation
+        do {
+            return try await preparation.value
+        } catch {
+            if paperLayout == layout { paperLayout = nil }
+            throw error
+        }
+    }
+
+    private func page(for format: Format) async throws -> ExportPage {
+        guard !isClosed else { throw CancellationError() }
+        if let page = pages[format] { return page }
+        let size = format == .png
+            ? previewSize
+            : NSSize(width: MarkdownHTML.preferredPageWidth, height: previewSize.height)
         let page = ExportPage(size: size, configuration: configuration)
-        page.webView.appearance = appearance
+        page.webView.appearance = format == .paper ? NSAppearance(named: .aqua) : appearance
         page.webView.pageZoom = format == .png ? previewZoom : 1
+        page.webView.mediaType = format == .paper ? "print" : nil
         pages[format] = page
         do {
             try await page.load(html, baseURL: baseURL)
             let css = format == .pdf ? MarkdownHTML.previewPrintOverrideCSS : ""
             _ = try await page.webView.callAsyncJavaScript("""
-                document.documentElement.classList.add(printClass);
+                if (matchesPreview) document.documentElement.classList.add(printClass);
                 const style = document.createElement('style');
                 style.textContent = css;
                 document.head.append(style);
@@ -70,11 +139,26 @@ final class DocumentExportSession {
                 images.forEach(image => { image.loading = 'eager'; });
                 await Promise.allSettled(images.map(image => image.decode()));
                 await document.fonts.ready;
-                \(ExportTableLayout.prepareScript)
-                """, arguments: ["printClass": MarkdownHTML.previewPrintClass, "css": css],
+                """, arguments: ["matchesPreview": format != .paper,
+                                 "printClass": MarkdownHTML.previewPrintClass, "css": css],
                 in: nil, contentWorld: .page)
+            if format == .paper {
+                if !mermaidSources.isEmpty {
+                    _ = try await page.webView.evaluateJavaScript(MarkdownHTML.paperMermaidScript)
+                    _ = try await page.webView.callAsyncJavaScript("""
+                        document.querySelectorAll('.mermaid').forEach((node, index) => {
+                            node.__mdSrc = sources[index];
+                            node.style.transform = '';
+                        });
+                        await window.MdPreview.mermaidRenderAll('default');
+                        """, arguments: ["sources": mermaidSources], in: nil, contentWorld: .page)
+                }
+            } else {
+                _ = try await page.webView.callAsyncJavaScript(
+                    ExportTableLayout.prepareScript, in: nil, contentWorld: .page)
+            }
             guard !isClosed else { throw CancellationError() }
-            return page.webView
+            return page
         } catch {
             pages.removeValue(forKey: format)?.close()
             throw error
@@ -101,6 +185,8 @@ final class DocumentExportSession {
 
     func close() {
         isClosed = true
+        paperPreparation?.cancel()
+        paperPreparation = nil
         pages.values.forEach { $0.close() }
         pages.removeAll()
     }

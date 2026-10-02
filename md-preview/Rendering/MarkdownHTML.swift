@@ -231,9 +231,9 @@ nonisolated enum MarkdownHTML {
     /// deliberately smaller than the sides: the first line of every page adds
     /// roughly 20pt of its own leading above the glyphs, so equal margins make
     /// the top read as a much deeper gap than the sides.
-    static let printPageMarginTop = "0.5in"
-    static let printPageMarginSide = "0.75in"
-    static let printPageMarginBottom = "0.6in"
+    static let printPageMarginTopPoints: CGFloat = 36
+    static let printPageMarginSidePoints: CGFloat = 54
+    static let printPageMarginBottomPoints: CGFloat = 43.2
 
     // Block margin-top tokens. The editor bundle receives these through
     // MDEditor.create's `spacing` option so both surfaces space blocks

@@ -112,13 +112,20 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         let exported = try await DocumentExportSession.capture(from: harness.webView)
         let view = try await exported.webView(for: .pdf)
         _ = try await printPDF(view, session: exported, name: "repeated-export")
-        let paper = try await printPDF(harness.webView, name: "regular-print")
+        let paperSession = try await DocumentExportSession.capture(from: harness.webView)
+        let info = printInfo()
+        let paperView = try await paperSession.preparePaper(using: info, pointSize: 12)
+        let paper = try await printPDF(paperView, session: paperSession, info: info, name: "regular-print")
         assertCompleteText([longHeader, longValue, prose], in: paper)
-        assertTextInsidePages(paper)
+        assertWholeWords(["Measure", "Static", "Category", "Stable", "Mixed", "Ordinary", "Grouped"], in: paper)
+        assertTextInsidePages(paper, paperMargins: true)
+        XCTAssertLessThanOrEqual(paper.pageCount, 4)
+        let after = try await documentState(harness.webView)
+        XCTAssertEqual(after, before)
     }
 
     func testPDFTableContinuesAcrossPages() async throws {
-        let rows = (1...70).map { "| Status\($0) | \(prose) |" }.joined(separator: "\n")
+        let rows = (1...70).map { "| Status\(String(format: "%03d", $0)) | \(prose) |" }.joined(separator: "\n")
         let harness = makeHarness(markdown: "| Label | Description |\n| --- | --- |\n\(rows)")
         defer { harness.close() }
         _ = try await harness.layout(texts: [], imageCount: 0)
@@ -126,7 +133,7 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         let view = try await session.webView(for: .pdf)
         let pdf = try await printPDF(view, session: session, name: "multiple-pages")
         XCTAssertGreaterThan(pdf.pageCount, 1)
-        assertWholeWords((1...70).map { "Status\($0)" }, in: pdf)
+        assertWholeWords((1...70).map { "Status\(String(format: "%03d", $0))" }, in: pdf)
         assertCompleteText([prose], in: pdf)
         assertTextInsidePages(pdf)
     }
@@ -168,7 +175,7 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
             let heading = "| " + Array(repeating: "Category", count: columns).joined(separator: " | ")
                 + " |\n| " + Array(repeating: "---", count: columns).joined(separator: " | ") + " |"
             let rows = (1...rowCount).map { row in
-                "| Row\(row) | " + Array(repeating: "Static", count: columns - 1).joined(separator: " | ") + " |"
+                "| Row\(String(format: "%03d", row)) | " + Array(repeating: "Static", count: columns - 1).joined(separator: " | ") + " |"
             }.joined(separator: "\n")
             let harness = makeHarness(markdown: "\(surroundingText)\n\n\(heading)\n\(rows)\n\nFollowing text.")
             defer { harness.close() }
@@ -176,12 +183,14 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
             let session = try await DocumentExportSession.capture(from: harness.webView)
             let view = try await session.webView(for: .pdf)
             let pdf = try await printPDF(view, session: session, name: "dense-\(columns)-\(rowCount)")
-            assertWholeWords(["Category", "Static"] + (1...rowCount).map { "Row\($0)" }, in: pdf)
+            assertWholeWords(Array(repeating: "Category", count: columns)
+                + Array(repeating: "Static", count: (columns - 1) * rowCount)
+                + (1...rowCount).map { "Row\(String(format: "%03d", $0))" }, in: pdf)
             XCTAssertEqual(try textBounds(surroundingText, in: pdf).height, referenceHeight, accuracy: 0.1)
             XCTAssertEqual(try textBounds("Following text.", in: pdf).height, referenceHeight, accuracy: 0.1)
             if rowCount == 1 {
                 XCTAssertEqual(pdf.pageCount, 1)
-                let tableBottom = try textBounds("Row1", in: pdf).minY
+                let tableBottom = try textBounds("Row001", in: pdf).minY
                 XCTAssertLessThan(try textBounds("Following text.", in: pdf).maxY, tableBottom)
             } else {
                 XCTAssertGreaterThan(pdf.pageCount, 1)
@@ -266,6 +275,180 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         assertWholeWords(["Rendered", "Start", "Finish", "Category", "Static"], in: pdf)
         assertCompleteText([longValue], in: pdf)
         assertTextInsidePages(pdf)
+
+        let paperSession = try await DocumentExportSession.capture(from: harness.webView)
+        let info = printInfo()
+        let paperView = try await paperSession.preparePaper(using: info, pointSize: 12)
+        let theme = try await paperView.evaluateJavaScript("document.querySelector('.mermaid').dataset.mmTheme") as? String
+        XCTAssertEqual(theme, "default")
+        let diagramCount = try await paperView.evaluateJavaScript("document.querySelectorAll('.mermaid svg').length") as? Int
+        XCTAssertEqual(diagramCount, 1)
+        let paper = try await printPDF(paperView, session: paperSession, info: info, name: "paper-rendered-media")
+        assertWholeWords(["Rendered", "Start", "Finish", "Category", "Static"], in: paper)
+        assertCompleteText([longValue], in: paper)
+        assertTextInsidePages(paper, paperMargins: true)
+        let after = try await harness.webView.evaluateJavaScript(mediaScript) as? String
+        XCTAssertEqual(after, source)
+    }
+
+    func testPaperSettingsKeepAllColumnsAndSelectedBodySize() async throws {
+        let headings = Array(repeating: "Category", count: 20).joined(separator: " | ")
+        let dividers = Array(repeating: "---", count: 20).joined(separator: " | ")
+        let values = Array(repeating: "Static", count: 19).joined(separator: " | ") + " | FinalColumn"
+        let markdown = """
+        Before table.
+
+        | Mixed \(longHeader) | Description |
+        | --- | --- |
+        | Ordinary | \(prose) |
+
+        | \(headings) |
+        | \(dividers) |
+        | \(values) |
+
+        After table.
+        """
+        let cases: [(String, NSSize, NSPrintInfo.PaperOrientation, Int, CGFloat, DocumentFontSetting)] = [
+            ("letter", NSSize(width: 612, height: 792), .portrait, 12, 1, .system),
+            ("a4-landscape", NSSize(width: 595.28, height: 841.89), .landscape, 18, 1, .georgia),
+            ("small", NSSize(width: 612, height: 792), .portrait, 6, 1, .system),
+            ("large", NSSize(width: 612, height: 792), .portrait, 48, 1, .system),
+            ("scaled", NSSize(width: 612, height: 792), .portrait, 12, 0.75, .georgia),
+        ]
+        for (name, paperSize, orientation, pointSize, scale, font) in cases {
+            let harness = makeHarness(markdown: markdown, font: font)
+            defer { harness.close() }
+            _ = try await harness.layout(texts: [], imageCount: 0)
+            let source = try await documentState(harness.webView)
+            let session = try await DocumentExportSession.capture(from: harness.webView)
+            defer { session.close() }
+            let info = printInfo()
+            info.paperSize = paperSize
+            info.orientation = orientation
+            info.scalingFactor = scale
+            let view = try await session.preparePaper(using: info, pointSize: pointSize)
+            let headerEdge = try await view.evaluateJavaScript(
+                "document.querySelector('th').getBoundingClientRect().right") as? Double
+            let headerRight = try XCTUnwrap(headerEdge)
+            let pdf = try await printPDF(view, session: session, info: info, name: "paper-\(name)")
+            assertWholeWords(Array(repeating: "Category", count: 20)
+                + Array(repeating: "Static", count: 19) + ["FinalColumn", "Ordinary", "Mixed"], in: pdf)
+            assertCompleteText([prose], in: pdf)
+            // PDFKit can insert the adjacent column between parts of a long cell.
+            let columnRight = MarkdownHTML.printPageMarginSidePoints + headerRight * 0.75 * scale
+            assertCompleteText([longHeader], in: pdf, columnRight: columnRight)
+            for text in ["Before table.", "After table."] {
+                let selection = try XCTUnwrap(pdf.findString(text, withOptions: []).first)
+                let font = try XCTUnwrap(selection.attributedString?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+                XCTAssertEqual(font.pointSize, CGFloat(pointSize) * scale, accuracy: 0.1, name)
+            }
+            assertTextInsidePages(pdf, paperMargins: true)
+            let after = try await documentState(harness.webView)
+            XCTAssertEqual(after, source)
+        }
+    }
+
+    func testPaperPreparationRestoresLayoutAfterSettingsChangesAndCancellation() async throws {
+        let harness = makeHarness(markdown: tables)
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let source = try await documentState(harness.webView)
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        let info = printInfo()
+        let view = try await session.preparePaper(using: info, pointSize: 12)
+        let initial = try await documentState(view)
+        info.orientation = .landscape
+        _ = try await session.preparePaper(using: info, pointSize: 24)
+        info.orientation = .portrait
+        _ = try await session.preparePaper(using: info, pointSize: 12)
+        let restored = try await documentState(view)
+        XCTAssertEqual(restored, initial)
+
+        let window = makeWindow()
+        defer { window.close() }
+        let operation = printOperation(view, info: info)
+        operation.printPanel = CancellingPrintPanel()
+        operation.showsPrintPanel = true
+        let success = await session.runPrintOperation(operation, from: window)
+        XCTAssertFalse(success)
+        XCTAssertTrue(session.isClosed)
+        do {
+            _ = try await session.preparePaper(using: info, pointSize: 18)
+            XCTFail("A closed print session was reused")
+        } catch is CancellationError {}
+        let after = try await documentState(harness.webView)
+        XCTAssertEqual(after, source)
+    }
+
+    func testPaperPreparationRejectsInvalidPaperAndAppliesTheLatestSettings() async throws {
+        let harness = makeHarness(markdown: tables)
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        defer { session.close() }
+        let info = printInfo()
+        info.paperSize = NSSize(width: 72, height: 72)
+        do {
+            _ = try await session.preparePaper(using: info, pointSize: 12)
+            XCTFail("Paper narrower than the margins was accepted")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, "doc.md-preview.export")
+        }
+        info.paperSize = NSSize(width: 612, height: 792)
+        let first = Task { try await session.preparePaper(using: info, pointSize: 18) }
+        await Task.yield()
+        let last = Task { try await session.preparePaper(using: info, pointSize: 12) }
+        _ = try await first.value
+        let view = try await last.value
+        let size = try await view.evaluateJavaScript("getComputedStyle(document.body).fontSize") as? String
+        XCTAssertEqual(size, "16px")
+    }
+
+    func testNestedTablesAndMergedCellsPreserveTextAndFrontmatter() async throws {
+        let nestedLabels = (1...20).map { String(format: "Nested%02d", $0) }
+        let nestedCells = nestedLabels.map { "<td>\($0)</td>" }.joined()
+        let markdown = """
+        ---
+        title: Export example
+        ---
+
+        <table>
+        <thead><tr><th rowspan="2">Region</th><th colspan="2">\(longHeader)</th></tr>
+        <tr><th>North</th><th>South</th></tr></thead>
+        <tbody><tr><td rowspan="2">Grouped</td><td>\(longValue)</td><td>East</td></tr>
+        <tr><td colspan="2"><table><tr>\(nestedCells)</tr></table></td></tr></tbody>
+        </table>
+
+        Following text.
+        """
+        let harness = makeHarness(markdown: markdown)
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let frontmatterScript = "document.querySelector('.md-frontmatter')?.outerHTML"
+        let frontmatter = try await harness.webView.evaluateJavaScript(frontmatterScript) as? String
+        XCTAssertNotNil(frontmatter)
+        for format: DocumentExportSession.Format in [.pdf, .png, .paper] {
+            let session = try await DocumentExportSession.capture(from: harness.webView)
+            defer { session.close() }
+            let info = printInfo()
+            let view: WKWebView
+            if format == .paper { view = try await session.preparePaper(using: info, pointSize: 12) }
+            else { view = try await session.webView(for: format) }
+            let exportedFrontmatter = try await view.evaluateJavaScript(frontmatterScript) as? String
+            XCTAssertEqual(exportedFrontmatter, frontmatter)
+            let pdf: PDFDocument
+            if format == .png {
+                let data = try await view.pdf(configuration: WKPDFConfiguration())
+                pdf = try XCTUnwrap(PDFDocument(data: data))
+                try saveArtifact(data, name: "nested-png-capture.pdf")
+            } else {
+                pdf = try await printPDF(view, session: session, info: info,
+                                         name: format == .paper ? "paper-nested" : "nested")
+            }
+            assertWholeWords(nestedLabels + ["Region", "North", "South", "Grouped", "East"], in: pdf)
+            assertCompleteText([longHeader, longValue, "Following text."], in: pdf)
+            assertTextInsidePages(pdf, paperMargins: format == .paper)
+        }
     }
 
     private func makeHarness(markdown: String, width: CGFloat = 900, margins: Double = 0,
@@ -297,9 +480,14 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         return window
     }
 
-    private func printOperation(_ view: WKWebView) -> NSPrintOperation {
+    private func printInfo() -> NSPrintInfo {
         let info = NSPrintInfo()
         info.paperSize = NSSize(width: 612, height: 792)
+        return info
+    }
+
+    private func printOperation(_ view: WKWebView, info: NSPrintInfo? = nil) -> NSPrintOperation {
+        let info = info ?? printInfo()
         info.horizontalPagination = .fit
         info.verticalPagination = .automatic
         info.isHorizontallyCentered = true
@@ -312,12 +500,12 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
     }
 
     private func printPDF(_ view: WKWebView, session: DocumentExportSession? = nil,
-                          name: String) async throws -> PDFDocument {
+                          info: NSPrintInfo? = nil, name: String) async throws -> PDFDocument {
         let window = makeWindow()
         defer { window.close() }
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
         defer { try? FileManager.default.removeItem(at: output) }
-        let operation = printOperation(view)
+        let operation = printOperation(view, info: info)
         operation.printInfo.jobDisposition = .save
         operation.printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = output
         let owner: DocumentExportSession
@@ -342,9 +530,20 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         return selection.bounds(for: try XCTUnwrap(selection.pages.first))
     }
 
-    private func assertCompleteText(_ values: [String], in pdf: PDFDocument,
+    private func assertCompleteText(_ values: [String], in pdf: PDFDocument, columnRight: CGFloat? = nil,
                                     file: StaticString = #filePath, line: UInt = #line) {
-        let text = (pdf.string ?? "").filter { !$0.isWhitespace }
+        let content: String
+        if let columnRight {
+            content = (0..<pdf.pageCount).compactMap { index in
+                guard let page = pdf.page(at: index) else { return nil }
+                var bounds = page.bounds(for: .mediaBox)
+                bounds.size.width = columnRight
+                return page.selection(for: bounds)?.string
+            }.joined()
+        } else {
+            content = pdf.string ?? ""
+        }
+        let text = content.filter { !$0.isWhitespace }
         for value in values {
             XCTAssertTrue(text.contains(value.filter { !$0.isWhitespace }),
                           "PDF lost text: \(value)", file: file, line: line)
@@ -353,19 +552,28 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
 
     private func assertWholeWords(_ words: [String], in pdf: PDFDocument,
                                   file: StaticString = #filePath, line: UInt = #line) {
-        for word in words {
+        for (word, occurrences) in Dictionary(grouping: words, by: { $0 }) {
             let matches = pdf.findString(word, withOptions: [])
-            XCTAssertFalse(matches.isEmpty, "Missing word: \(word)", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(matches.count, occurrences.count,
+                "Missing or split occurrence of \(word)", file: file, line: line)
             for match in matches {
                 XCTAssertEqual(match.selectionsByLine().count, 1, "Split word: \(word)", file: file, line: line)
             }
         }
     }
 
-    private func assertTextInsidePages(_ pdf: PDFDocument, file: StaticString = #filePath, line: UInt = #line) {
+    private func assertTextInsidePages(_ pdf: PDFDocument, paperMargins: Bool = false,
+                                       file: StaticString = #filePath, line: UInt = #line) {
         for index in 0..<pdf.pageCount {
             guard let page = pdf.page(at: index) else { continue }
-            let bounds = page.bounds(for: .mediaBox).insetBy(dx: -1, dy: -1)
+            var bounds = page.bounds(for: .mediaBox)
+            if paperMargins {
+                bounds.origin.x += MarkdownHTML.printPageMarginSidePoints
+                bounds.size.width -= 2 * MarkdownHTML.printPageMarginSidePoints
+                bounds.origin.y += MarkdownHTML.printPageMarginBottomPoints
+                bounds.size.height -= MarkdownHTML.printPageMarginTopPoints + MarkdownHTML.printPageMarginBottomPoints
+            }
+            bounds = bounds.insetBy(dx: -1, dy: -1)
             for character in 0..<page.numberOfCharacters {
                 let rect = page.characterBounds(at: character)
                 if !rect.isEmpty {

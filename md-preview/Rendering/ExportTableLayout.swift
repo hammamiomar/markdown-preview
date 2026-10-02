@@ -1,92 +1,108 @@
 nonisolated enum ExportTableLayout {
     static let prepareScript = #"""
-    const tolerance = 0.5;
+    window.__mdRestoreExportTables?.();
     const article = document.querySelector('article.markdown-body');
     if (!article) return;
 
+    const tolerance = 0.5;
     const number = value => parseFloat(value) || 0;
-    const articleStyle = getComputedStyle(article);
-    const articleWidth = article.getBoundingClientRect().width
-        - number(articleStyle.paddingLeft) - number(articleStyle.paddingRight);
+    const styles = new Map();
+    const remember = element => styles.set(element, element.getAttribute('style'));
+    window.__mdRestoreExportTables = () => styles.forEach((style, element) => {
+        if (style === null) element.removeAttribute('style');
+        else element.setAttribute('style', style);
+    });
 
-    function textRuns(cell) {
-        const runs = [];
-        let run = [];
-        const flush = () => {
-            if (run.length) runs.push(run);
-            run = [];
-        };
-        function visit(node) {
-            if (node.nodeType === Node.TEXT_NODE) {
-                for (const match of node.textContent.matchAll(/\s+|\S+/gu)) {
-                    if (/\s/u.test(match[0])) flush();
-                    else run.push({ node, start: match.index, end: match.index + match[0].length });
-                }
-                return;
-            }
-            if (node.nodeType !== Node.ELEMENT_NODE) return;
-            if (node.matches('br, wbr, code, pre, svg, math, .katex, table, img')) {
-                flush();
-                return;
-            }
-            const display = getComputedStyle(node).display;
-            const block = display !== 'inline' && display !== 'contents';
-            if (block) flush();
-            Array.from(node.childNodes).forEach(visit);
-            if (block) flush();
-        }
-        Array.from(cell.childNodes).forEach(visit);
-        flush();
-        return runs;
-    }
-
-    function wrapOversizedRuns(cell, available) {
-        const runs = textRuns(cell);
-        const style = getComputedStyle(cell);
-        const width = available - number(style.paddingLeft) - number(style.paddingRight)
+    function contentWidth(element) {
+        const style = getComputedStyle(element);
+        return element.getBoundingClientRect().width
+            - number(style.paddingLeft) - number(style.paddingRight)
             - number(style.borderLeftWidth) - number(style.borderRightWidth);
-        const originalStyle = cell.style.cssText;
-        cell.style.whiteSpace = 'nowrap';
-        const oversized = runs.filter(run => {
-            const range = document.createRange();
-            range.setStart(run[0].node, run[0].start);
-            range.setEnd(run.at(-1).node, run.at(-1).end);
-            return range.getBoundingClientRect().width > width + tolerance;
-        });
-        cell.style.cssText = originalStyle;
-
-        // Wrap text-node pieces separately so links and emphasis keep their structure.
-        oversized.flat().reverse().forEach(({ node, start, end }) => {
-            const text = node.splitText(start);
-            text.splitText(end - start);
-            const span = document.createElement('span');
-            span.style.overflowWrap = 'anywhere';
-            text.replaceWith(span);
-            span.append(text);
-        });
     }
 
-    Array.from(article.querySelectorAll('table')).reverse().forEach(table => {
-        const available = Math.min(table.getBoundingClientRect().width, articleWidth);
-        if (available <= 0) return;
+    function columnCount(table) {
+        let count = 0;
+        let group;
+        let occupied = [];
         Array.from(table.rows).forEach(row => {
-            Array.from(row.cells).forEach(cell => wrapOversizedRuns(cell, available));
+            if (row.parentElement !== group) {
+                group = row.parentElement;
+                occupied = [];
+            }
+            let column = 0;
+            for (const cell of row.cells) {
+                while (occupied[column] > 0) column++;
+                const rows = cell.rowSpan || group.rows.length;
+                for (let offset = 0; offset < cell.colSpan; offset++) {
+                    occupied[column + offset] = rows;
+                }
+                column += cell.colSpan;
+                count = Math.max(count, column);
+            }
+            occupied = occupied.map(rows => rows - 1);
+        });
+        return count;
+    }
+
+    function minimumWidths(cells, overflowWrap) {
+        const probes = cells.map(cell => {
+            const measure = cell.cloneNode(true);
+            Object.assign(measure.style, {
+                position: 'absolute', display: 'inline-block', visibility: 'hidden',
+                width: 'min-content', minWidth: '0', maxWidth: 'none', overflowWrap
+            });
+            cell.append(measure);
+            return measure;
+        });
+        const widths = probes.map(measure => measure.getBoundingClientRect().width);
+        probes.forEach(measure => measure.remove());
+        return widths;
+    }
+
+    const articleWidth = contentWidth(article);
+    Array.from(article.querySelectorAll('table')).reverse().forEach(table => {
+        if (table.closest('.md-frontmatter')) return;
+        const available = Math.min(contentWidth(table.parentElement), articleWidth);
+        const columns = columnCount(table);
+        if (available <= 0 || columns === 0) return;
+
+        remember(table);
+        Object.assign(table.style, {
+            display: 'table', tableLayout: 'auto', width: 'min-content',
+            maxWidth: 'none', alignSelf: 'flex-start', overflow: 'visible'
+        });
+        const cells = Array.from(table.rows).flatMap(row => Array.from(row.cells));
+        cells.forEach(cell => {
+            remember(cell);
+            cell.style.overflowWrap = 'normal';
+        });
+        const widths = minimumWidths(cells, 'normal');
+        const oversized = cells.filter((cell, index) => widths[index] > available + tolerance);
+        const wrappedWidths = minimumWidths(oversized, 'anywhere');
+        oversized.forEach((cell, index) => {
+            cell.style.maxWidth = wrappedWidths[index] + 'px';
+            cell.style.overflowWrap = 'break-word';
+        });
+        // Reserve the columns' minimum widths before sharing the remaining space.
+        const minimumTableWidth = table.getBoundingClientRect().width;
+        const minimumCellWidths = oversized.map(cell => cell.getBoundingClientRect().width);
+        oversized.forEach((cell, index) => {
+            const minimum = minimumCellWidths[index];
+            const share = available * cell.colSpan / columns;
+            const remaining = available - minimumTableWidth + minimum;
+            cell.style.maxWidth = Math.max(minimum, Math.min(share, remaining)) + 'px';
         });
 
-        table.style.display = 'table';
         table.style.width = 'auto';
-        table.style.maxWidth = 'none';
-        table.style.alignSelf = 'flex-start';
-        table.style.overflow = 'visible';
         const rect = table.getBoundingClientRect();
-        if (rect.width <= available + tolerance) return;
-
+        // Nested tables scale with their outer table.
+        if (table.parentElement.closest('table') || rect.width <= available + tolerance) return;
         const scale = available / rect.width;
         const style = getComputedStyle(table);
         table.style.width = rect.width + 'px';
         table.style.transformOrigin = style.direction === 'rtl' ? 'top right' : 'top left';
         table.style.transform = 'scale(' + scale + ')';
-        // Transforms do not reduce the space reserved for the table in normal flow.
+        // Transforms leave the table's original height in normal flow.
         table.style.marginBottom = (number(style.marginBottom) + rect.height * (scale - 1)) + 'px';
     });
     """#
