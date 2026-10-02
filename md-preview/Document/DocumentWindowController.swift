@@ -118,7 +118,12 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     let themesPopoverEscapeMonitor = EscapeKeyMonitor()
     weak var searchField: NSSearchField?
     /// The Table of Contents / Project Navigator picker in the toolbar.
-    weak var sidebarModeItem: NSToolbarItemGroup?
+    var sidebarModeItem: NSToolbarItemGroup?
+    /// The original position and spacer while sidebar-only items are removed.
+    var collapsedSidebarModePlacement: SidebarToolbarItemOrder.Placement?
+    var sidebarToolbarSyncInProgress = false
+    var toolbarItemOrderPersistenceReady = false
+    var toolbarPreferenceObservations: [NSKeyValueObservation] = []
     /// Timestamp of the last click handled by the sidebar mode picker.
     var sidebarToolbarHandledEventTimestamp: TimeInterval?
     var findBar: FindBar?
@@ -210,15 +215,23 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         documentWindow.center()
         documentWindow.setFrameAutosaveName("MainWindow")
 
-        let toolbar = NSToolbar(identifier: "MainToolbar")
+        // AppKit broadcasts item mutations between toolbars with a shared ID.
+        // Collapse is per-window, so share saved preferences, not live items.
+        let toolbar = NSToolbar(identifier: "MainToolbar-\(UUID().uuidString)")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = true
-        toolbar.autosavesConfiguration = true
+        toolbar.autosavesConfiguration = false
         documentWindow.toolbar = toolbar
+        if let saved = UserDefaults.standard.dictionary(forKey: "MainToolbar.configuration")
+            ?? UserDefaults.standard.dictionary(forKey: "NSToolbar Configuration MainToolbar") {
+            toolbar.setConfiguration(saved)
+        }
         documentWindow.toolbarStyle = .automatic
+        restoreToolbarItemOrder(toolbar)
         replaceZoomToolbarItemIfNeeded(in: toolbar)
         migrateLegacySidebarToolbarIfNeeded(in: toolbar)
+        observeAndPersistToolbarPreferences(toolbar)
 
         installFindBar()
         applyWindowBackgroundTheme()
