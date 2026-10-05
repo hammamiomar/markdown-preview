@@ -27,6 +27,7 @@ final class DocumentExportSession {
     private var pages: [Format: ExportPage] = [:]
     private var paperLayout: PaperLayout?
     private var paperPreparation: Task<WKWebView, Error>?
+    private var pngPreparation: Task<Data, Error>?
     private var printCompletion: ExportPrintCompletion?
     private(set) var isClosed = false
 
@@ -176,17 +177,38 @@ final class DocumentExportSession {
     }
 
     func writePNG(to url: URL) async throws {
-        defer { pages.removeValue(forKey: .png)?.close() }
-        let view = try await webView(for: .png)
-        // WebKit's PDF capture uses screen media and one continuous page.
-        let data = try await view.pdf(configuration: WKPDFConfiguration())
-        try Self.writePNG(fromPDF: data, to: url)
+        guard !isClosed else { throw CancellationError() }
+        let preparation: Task<Data, Error>
+        if let pngPreparation {
+            preparation = pngPreparation
+        } else {
+            // Share the render so one save cannot close another's page.
+            preparation = Task {
+                defer { pages.removeValue(forKey: .png)?.close() }
+                do {
+                    let view = try await webView(for: .png)
+                    // WebKit's PDF capture uses screen media and one continuous page.
+                    let data = try await view.pdf(configuration: WKPDFConfiguration())
+                    try Task.checkCancellation()
+                    return try Self.pngData(fromPDF: data)
+                } catch {
+                    pngPreparation = nil
+                    throw error
+                }
+            }
+            pngPreparation = preparation
+        }
+        let data = try await preparation.value
+        guard !isClosed else { throw CancellationError() }
+        try data.write(to: url)
     }
 
     func close() {
         isClosed = true
         paperPreparation?.cancel()
         paperPreparation = nil
+        pngPreparation?.cancel()
+        pngPreparation = nil
         pages.values.forEach { $0.close() }
         pages.removeAll()
     }
@@ -271,7 +293,7 @@ private final class ExportPrintCompletion: NSObject {
 }
 
 extension DocumentExportSession {
-    private static func writePNG(fromPDF data: Data, to url: URL) throws {
+    private static func pngData(fromPDF data: Data) throws -> Data {
         guard let document = PDFDocument(data: data), document.pageCount > 0 else {
             throw exportError("The document could not be rendered as an image.")
         }
@@ -328,7 +350,7 @@ extension DocumentExportSession {
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw exportError("The image could not be encoded.")
         }
-        try png.write(to: url)
+        return png
     }
 
 }

@@ -42,6 +42,10 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
                 let labels = ["Measure", "Static", "Category", "Stable", "Mixed", "Ordinary", "Grouped"]
                 let before = try await harness.layout(texts: labels, imageCount: 0)
                 let source = try await documentState(harness.webView)
+                // Legacy scrollbars occupy part of the view width.
+                let viewportWidth = try await harness.webView.evaluateJavaScript(
+                    "document.documentElement.clientWidth") as? Double
+                let expectedWidth = CGFloat(try XCTUnwrap(viewportWidth))
                 let name = "tables-\(Int(width))-margins-\(Int(margins))"
 
                 let session = try await DocumentExportSession.capture(from: harness.webView)
@@ -49,7 +53,7 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
                 let imageView = try await session.webView(for: .png)
                 let imagePDFData = try await imageView.pdf(configuration: WKPDFConfiguration())
                 let imagePDF = try XCTUnwrap(PDFDocument(data: imagePDFData))
-                XCTAssertEqual(imagePDF.page(at: 0)?.bounds(for: .mediaBox).width, width)
+                XCTAssertEqual(imagePDF.page(at: 0)?.bounds(for: .mediaBox).width, expectedWidth)
                 assertCompleteText([longHeader, longValue, prose], in: imagePDF)
                 assertWholeWords(labels, in: imagePDF)
                 assertTextInsidePages(imagePDF)
@@ -59,7 +63,7 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
                 try await session.writePNG(to: imageURL)
                 let imageData = try Data(contentsOf: imageURL)
                 let image = try XCTUnwrap(NSBitmapImageRep(data: imageData))
-                XCTAssertEqual(image.pixelsWide, Int(width * 2))
+                XCTAssertEqual(image.pixelsWide, Int(expectedWidth * 2))
                 try saveArtifact(imageData, name: "\(name).png")
 
                 let pdfView = try await session.webView(for: .pdf)
@@ -75,6 +79,76 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
                 XCTAssertEqual(finalSource, source)
             }
         }
+    }
+
+    func testOverlappingPNGSavesMatchACompletedExport() async throws {
+        let harness = makeHarness(markdown: "| Category | Value |\n| --- | --- |\n| Static | \(longValue) |")
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let referenceURL = directory.appendingPathComponent("reference.png")
+        let reference = try await DocumentExportSession.capture(from: harness.webView)
+        defer { reference.close() }
+        try await reference.writePNG(to: referenceURL)
+        let expected = try Data(contentsOf: referenceURL)
+        XCTAssertNotNil(NSBitmapImageRep(data: expected))
+
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        defer { session.close() }
+        let firstURL = directory.appendingPathComponent("first.png")
+        let secondURL = directory.appendingPathComponent("second.png")
+        async let first: Void = session.writePNG(to: firstURL)
+        async let second: Void = session.writePNG(to: secondURL)
+        _ = try await (first, second)
+        XCTAssertEqual(try Data(contentsOf: firstURL), expected)
+        XCTAssertEqual(try Data(contentsOf: secondURL), expected)
+    }
+
+    func testPNGWriteFailureAllowsRetryAndClosedSessionRejectsWrites() async throws {
+        let harness = makeHarness(markdown: "PNG export example.")
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        defer { session.close() }
+        do {
+            try await session.writePNG(to: directory.appendingPathComponent("missing/output.png"))
+            XCTFail("Writing to a missing directory succeeded")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain)
+        }
+        let output = directory.appendingPathComponent("retry.png")
+        try await session.writePNG(to: output)
+        XCTAssertNotNil(NSBitmapImageRep(data: try Data(contentsOf: output)))
+
+        session.close()
+        let closedOutput = directory.appendingPathComponent("closed.png")
+        do {
+            try await session.writePNG(to: closedOutput)
+            XCTFail("A closed export session was reused")
+        } catch is CancellationError {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: closedOutput.path))
+    }
+
+    func testClosingSessionCancelsPNGPreparation() async throws {
+        let harness = makeHarness(markdown: tables)
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let write = Task { try await session.writePNG(to: output) }
+        await Task.yield()
+        session.close()
+        do {
+            try await write.value
+            XCTFail("PNG preparation continued after closing the session")
+        } catch is CancellationError {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
     }
 
     func testCancellationAndRepeatedExportsLeavePaperPrintingIntact() async throws {

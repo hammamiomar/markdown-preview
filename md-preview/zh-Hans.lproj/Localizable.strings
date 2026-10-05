@@ -92,6 +92,8 @@
 "Format:" = "格式：";
 "PDF Document" = "PDF 文稿";
 "HTML Document" = "HTML 文稿";
+"The document could not be prepared for export." = "无法准备要导出的文稿。";
+"The selected paper has no printable area." = "所选纸张没有可打印区域。";
 
 /* Go menu */
 "Go" = "前往";

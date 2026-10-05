@@ -450,7 +450,7 @@ private final class ExportPrintPanel: NSPrintPanel {
     private weak var printSheetWindow: NSWindow?
     private weak var printSheetController: NSWindowController?
     private var isObservingPrintSheet = false
-    private var isShowingFileSavePanel = false
+    private var isSavingFile = false
     private var didRemoveTopPocket = false
 
     /// `initialFormat` lets Export as PDF… open on PDF while still offering the
@@ -513,7 +513,7 @@ private final class ExportPrintPanel: NSPrintPanel {
         parentWindow = nil
         printSheetWindow = nil
         printSheetController = nil
-        isShowingFileSavePanel = false
+        isSavingFile = false
         didRemoveTopPocket = false
         isObservingPrintSheet = false
     }
@@ -588,10 +588,13 @@ private final class ExportPrintPanel: NSPrintPanel {
     }
 
     private func configureSaveButton(on controller: NSWindowController) {
-        guard !isShowingFileSavePanel else { return }
         guard let saveButton = privateObject(
             named: "printButton", on: controller) as? NSButton
         else { return }
+        guard !isSavingFile else {
+            saveButton.isEnabled = false
+            return
+        }
 
         saveButton.title = NSLocalizedString(
             "Save", comment: "Export button title")
@@ -622,13 +625,16 @@ private final class ExportPrintPanel: NSPrintPanel {
 
     @objc private func saveExportedFile(_ sender: Any?) {
         let format = selectedFormat
-        guard !isShowingFileSavePanel,
+        guard !isSavingFile,
               !format.usesPrintPipeline,
               let fileExportSource,
               let printSheetWindow
         else { return }
 
-        isShowingFileSavePanel = true
+        isSavingFile = true
+        if let printSheetController {
+            configureSaveButton(on: printSheetController)
+        }
         let panel = NSSavePanel()
         panel.title = NSLocalizedString(
             "Export", comment: "Export panel title")
@@ -654,11 +660,11 @@ private final class ExportPrintPanel: NSPrintPanel {
 
         panel.beginSheetModal(for: printSheetWindow) { [weak self] response in
             guard let self else { return }
-            self.isShowingFileSavePanel = false
             // NSSavePanel may invoke its completion while it is still ordered
             // onscreen. Detach it before restoring or ending the outer sheet.
             panel.orderOut(nil)
             guard response == .OK, let url = panel.url else {
+                self.isSavingFile = false
                 if let printSheetController = self.printSheetController {
                     self.configureSaveButton(on: printSheetController)
                 }
@@ -669,23 +675,32 @@ private final class ExportPrintPanel: NSPrintPanel {
             case .html:
                 do {
                     try fileExportSource.writeHTML(to: url)
+                    self.completeFileExport(error: nil)
                 } catch {
-                    NSAlert(error: error).beginSheetModal(for: printSheetWindow)
-                    return
+                    self.completeFileExport(error: error)
                 }
-                self.dismissAfterFileExport()
             case .png:
                 fileExportSource.writePNG(url) { [weak self] error in
-                    if let error {
-                        NSAlert(error: error).beginSheetModal(for: printSheetWindow)
-                        return
-                    }
-                    self?.dismissAfterFileExport()
+                    self?.completeFileExport(error: error)
                 }
             case .pdf:
                 break
             }
         }
+    }
+
+    private func completeFileExport(error: Error?) {
+        guard let printSheetWindow else { return }
+        guard let error else {
+            dismissAfterFileExport()
+            return
+        }
+        isSavingFile = false
+        if let printSheetController {
+            configureSaveButton(on: printSheetController)
+        }
+        guard !(error is CancellationError) else { return }
+        NSAlert(error: error).beginSheetModal(for: printSheetWindow)
     }
 
     /// These formats bypass NSPrintOperation. End the outer panel as cancelled
