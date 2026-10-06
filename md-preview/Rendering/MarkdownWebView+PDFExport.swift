@@ -254,6 +254,12 @@ private final class PrintNumberRowView: NSView {
         value = size
         onChange?(size)
     }
+
+    func setValue(_ requested: Int) {
+        value = min(max(requested, range.lowerBound), range.upperBound)
+        sizeField.integerValue = value
+        stepper.integerValue = value
+    }
 }
 
 /// Adds a "Markdown Preview" pane to the system print panel holding the font
@@ -268,6 +274,7 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
 
     private var pointSize = PrintSizeOptions.pointSize
     private var scalePercent: Int
+    private var scaleRow: PrintNumberRowView?
     private var exportFormat: DocumentExportFormat?
     private let showsPrintSize: Bool
     private var printInfoObservers: [NSKeyValueObservation] = []
@@ -297,11 +304,24 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
     }
 
     func prepareForPrinting(using info: NSPrintInfo) async throws {
-        // Our Scale row owns scaling; never let a printer preset apply it twice.
-        if info.scalingFactor != 1 { info.scalingFactor = 1 }
+        adoptPresetScale(using: info)
         let layoutInfo = info.copy() as? NSPrintInfo ?? NSPrintInfo()
         layoutInfo.scalingFactor = CGFloat(scalePercent) / 100
         try await preparePaper?(layoutInfo, pointSize)
+    }
+
+    private func adoptPresetScale(using info: NSPrintInfo) {
+        // Adopt a printer preset's scale before clearing the native setting so
+        // WebKit applies it once, during layout rather than pagination.
+        if info.scalingFactor != 1 {
+            let factor = info.scalingFactor
+            willChangeValue(forKey: "localizedSummaryItems")
+            scalePercent = factor.isFinite && factor > 0
+                ? Int(min(max(factor * 100, 50), 200).rounded()) : 100
+            scaleRow?.setValue(scalePercent)
+            didChangeValue(forKey: "localizedSummaryItems")
+            info.scalingFactor = 1
+        }
     }
 
     private func refreshPreview() {
@@ -348,6 +368,7 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
             let scaleRow = PrintNumberRowView(
                 width: 620, label: NSLocalizedString("Scale:", comment: "Print scale field label"),
                 value: scalePercent, range: 50...200, suffix: "%")
+            self.scaleRow = scaleRow
             scaleRow.onChange = { [weak self] percent in
                 guard let self else { return }
                 self.willChangeValue(forKey: "localizedSummaryItems")
