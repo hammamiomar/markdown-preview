@@ -467,19 +467,34 @@ final class EditorScrollAnchorTests: XCTestCase {
     func testTableColumnsKeepWordsWhole() async throws {
         let script = try TestVendor.script("md-preview/Vendor/CodeMirror/mdedit.min.js")
         let prose = Array(repeating: "ordinary words of prose", count: 20).joined(separator: " ")
-        let markdown = "Before the table.\n\n| Measure | Meaning |\n| --- | --- |\n| Static | \(prose) |"
+        let markdown = """
+        Before the table.
+
+        | Measure | Meaning |
+        | --- | --- |
+        | Static | \(prose) |
+
+        | ID | Candidate | Inspection and provisional placement |
+        | --- | --- | --- |
+        | TGW-F02 | `validation/tgw_solar_validation/hourly_ave_error/hourly_ave_error_2020.png` | visual; supplement |
+
+        | Date | Event | Source |
+        | --- | --- | --- |
+        | 9/3 10:50 | Some event description that is a bit long | x.com/theo/status/2095328650459840627 |
+        """
         for isEditor in [false, true] {
             let html = isEditor
                 ? EditorHTML.render(markdown: markdown, editorJavaScript: script)
                 : MarkdownHTML.render(markdown: markdown, allowsScroll: true).html
             let harness = WebViewLayoutHarness(html: html, width: 500, isEditor: isEditor, height: 400)
             defer { harness.close() }
-            let layout = try await harness.layout(texts: ["Measure", "Static", prose], imageCount: 0,
-                                                  selectors: [isEditor ? ".cm-md-table-grid" : "table": 1])
+            let layout = try await harness.layout(texts: ["Measure", "Static", prose, "Candidate", "Inspection", "Date", "Source"], imageCount: 0,
+                                                  selectors: [isEditor ? ".cm-md-table-grid" : "table": 3])
             let lines = layout.elements.map(\.lines.count)
             let mode = isEditor ? "editor" : "reader"
             XCTAssertEqual(Array(lines.prefix(2)), [1, 1], "\(mode): \(lines)")
             XCTAssertGreaterThan(lines[2], 1, "\(mode): \(lines)")
+            XCTAssertEqual(Array(lines.suffix(4)), [1, 1, 1, 1], "\(mode): \(lines)")
         }
     }
 

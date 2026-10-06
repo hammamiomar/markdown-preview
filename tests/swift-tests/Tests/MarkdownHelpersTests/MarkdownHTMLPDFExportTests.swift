@@ -388,6 +388,9 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
             ("small", NSSize(width: 612, height: 792), .portrait, 6, 1, .system),
             ("large", NSSize(width: 612, height: 792), .portrait, 48, 1, .system),
             ("scaled", NSSize(width: 612, height: 792), .portrait, 12, 0.75, .georgia),
+            ("scaled-up", NSSize(width: 612, height: 792), .portrait, 12, 1.25, .georgia),
+            ("double", NSSize(width: 612, height: 792), .portrait, 12, 2, .system),
+            ("half-landscape", NSSize(width: 595.28, height: 841.89), .landscape, 18, 0.5, .georgia),
         ]
         for (name, paperSize, orientation, pointSize, scale, font) in cases {
             let harness = makeHarness(markdown: markdown, font: font)
@@ -404,12 +407,14 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
             let headerEdge = try await view.evaluateJavaScript(
                 "document.querySelector('th').getBoundingClientRect().right") as? Double
             let headerRight = try XCTUnwrap(headerEdge)
-            let pdf = try await printPDF(view, session: session, info: info, name: "paper-\(name)")
+            let outputInfo = DocumentExportSession.printInfoForPreparedPaper(info)
+            XCTAssertEqual(info.scalingFactor, scale)
+            let pdf = try await printPDF(view, session: session, info: outputInfo, name: "paper-\(name)")
             assertWholeWords(Array(repeating: "Category", count: 20)
                 + Array(repeating: "Static", count: 19) + ["FinalColumn", "Ordinary", "Mixed"], in: pdf)
             assertCompleteText([prose], in: pdf)
             // PDFKit can insert the adjacent column between parts of a long cell.
-            let columnRight = MarkdownHTML.printPageMarginSidePoints + headerRight * 0.75 * scale
+            let columnRight = MarkdownHTML.printPageMarginSidePoints + headerRight * 0.75
             assertCompleteText([longHeader], in: pdf, columnRight: columnRight)
             for text in ["Before table.", "After table."] {
                 let selection = try XCTUnwrap(pdf.findString(text, withOptions: []).first)
@@ -419,6 +424,27 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
             assertTextInsidePages(pdf, paperMargins: true)
             let after = try await documentState(harness.webView)
             XCTAssertEqual(after, source)
+        }
+    }
+
+    func testPaperPreparationRefitsWhenOnlyPrintScaleChanges() async throws {
+        let harness = makeHarness(markdown: tables)
+        defer { harness.close() }
+        _ = try await harness.layout(texts: [], imageCount: 0)
+        let session = try await DocumentExportSession.capture(from: harness.webView)
+        defer { session.close() }
+        let info = printInfo()
+        for scale: CGFloat in [1, 1.25, 0.75, 1] {
+            info.scalingFactor = scale
+            let view = try await session.preparePaper(using: info, pointSize: 12)
+            let width = try await view.evaluateJavaScript("parseFloat(document.body.style.width)") as? Double
+            let expected = (info.paperSize.width - 2 * MarkdownHTML.printPageMarginSidePoints) / scale * 96 / 72
+            XCTAssertEqual(try XCTUnwrap(width), expected, accuracy: 1)
+            let fits = try await view.evaluateJavaScript("""
+                [...document.querySelectorAll('table')].every(table =>
+                    table.getBoundingClientRect().right <= document.body.getBoundingClientRect().right + 1)
+                """) as? Bool
+            XCTAssertEqual(fits, true)
         }
     }
 

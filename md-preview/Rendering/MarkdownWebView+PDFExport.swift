@@ -164,49 +164,46 @@ private enum PrintSizeOptions {
     }
 }
 
-/// `Font Size: … [ 12 pt ] ⇅` — an editable field paired with a stepper, the
-/// same pairing the print panel's own Copies field uses.
-private final class PrintSizeRowView: NSView {
-    /// Called with the committed, clamped size. Persistence already happened.
+/// Editable numeric print setting, paired with a stepper.
+private final class PrintNumberRowView: NSView {
+    /// Called with the committed, clamped value.
     var onChange: ((Int) -> Void)?
 
-    private var pointSize: Int
+    private var value: Int
+    private let range: ClosedRange<Int>
     private let sizeField = NSTextField()
     private let stepper = NSStepper()
 
-    init(width: CGFloat) {
-        pointSize = PrintSizeOptions.pointSize
+    init(width: CGFloat, label: String, value: Int, range: ClosedRange<Int>, suffix: String) {
+        self.value = value
+        self.range = range
         super.init(frame: NSRect(x: 0, y: 0,
                                  width: width, height: AccessoryRowMetrics.height))
         autoresizingMask = [.width]
 
-        let caption = NSTextField(labelWithString: NSLocalizedString(
-            "Font Size:", comment: "Print font size field label"))
+        let caption = NSTextField(labelWithString: label)
 
         let formatter = NumberFormatter()
         formatter.numberStyle = .none
         formatter.allowsFloats = false
-        let pointUnit = NSLocalizedString(
-            "pt", comment: "Abbreviation for typographic points")
-        formatter.positiveSuffix = " \(pointUnit)"
-        // Keep direct numeric entry convenient: both `13` and `13 pt` commit
-        // to the same value, while the resting presentation always shows `pt`.
+        formatter.positiveSuffix = suffix
+        // Accept direct numeric entry as well as the displayed unit.
         formatter.isLenient = true
 
         sizeField.formatter = formatter
         sizeField.alignment = .right
-        sizeField.integerValue = pointSize
+        sizeField.integerValue = value
         sizeField.target = self
         sizeField.action = #selector(sizeFieldChanged(_:))
         // Commit on Return *and* on focus loss, so a typed value isn't lost by
         // clicking straight into the surrounding panel's controls.
         sizeField.cell?.sendsActionOnEndEditing = true
 
-        stepper.minValue = Double(PrintSizeOptions.minimumPointSize)
-        stepper.maxValue = Double(PrintSizeOptions.maximumPointSize)
+        stepper.minValue = Double(range.lowerBound)
+        stepper.maxValue = Double(range.upperBound)
         stepper.increment = 1
         stepper.valueWraps = false
-        stepper.integerValue = pointSize
+        stepper.integerValue = value
         stepper.target = self
         stepper.action = #selector(stepperChanged(_:))
 
@@ -248,20 +245,19 @@ private final class PrintSizeRowView: NSView {
     }
 
     private func commit(_ requested: Int) {
-        let size = PrintSizeOptions.clamped(requested)
+        let size = min(max(requested, range.lowerBound), range.upperBound)
         // Echo the clamp back so the field never shows an out-of-range value,
         // and keep the two controls in step.
         sizeField.integerValue = size
         stepper.integerValue = size
-        guard size != pointSize else { return }
-        pointSize = size
-        PrintSizeOptions.pointSize = size
+        guard size != value else { return }
+        value = size
         onChange?(size)
     }
 }
 
 /// Adds a "Markdown Preview" pane to the system print panel holding the font
-/// size control, so the panel's own page thumbnails act as the preview.
+/// size and scale controls, so the panel's own page thumbnails act as the preview.
 private final class PrintSizeAccessoryController: NSViewController, NSPrintPanelAccessorizing {
     var preparePaper: ((NSPrintInfo, Int) async throws -> Void)?
     var presentError: ((Error) -> Void)?
@@ -271,6 +267,7 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
     @objc private dynamic var previewRevision = 0
 
     private var pointSize = PrintSizeOptions.pointSize
+    private var scalePercent: Int
     private var exportFormat: DocumentExportFormat?
     private let showsPrintSize: Bool
     private var printInfoObservers: [NSKeyValueObservation] = []
@@ -289,13 +286,22 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
                     guard change.oldValue != change.newValue else { return }
                     Task { @MainActor in self?.refreshPreview() }
                 },
+                // Presets can restore the hidden native scale setting.
+                info.observe(\.scalingFactor, options: [.old, .new]) { [weak self] _, change in
+                    guard change.newValue != 1 else { return }
+                    Task { @MainActor in self?.refreshPreview() }
+                },
             ]
             refreshPreview()
         }
     }
 
     func prepareForPrinting(using info: NSPrintInfo) async throws {
-        try await preparePaper?(info, pointSize)
+        // Our Scale row owns scaling; never let a printer preset apply it twice.
+        if info.scalingFactor != 1 { info.scalingFactor = 1 }
+        let layoutInfo = info.copy() as? NSPrintInfo ?? NSPrintInfo()
+        layoutInfo.scalingFactor = CGFloat(scalePercent) / 100
+        try await preparePaper?(layoutInfo, pointSize)
     }
 
     private func refreshPreview() {
@@ -311,7 +317,9 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
         }
     }
 
-    init(exportFormat: DocumentExportFormat? = nil) {
+    init(exportFormat: DocumentExportFormat? = nil, paperScale: CGFloat = 1) {
+        scalePercent = paperScale.isFinite && paperScale > 0
+            ? Int(min(max(paperScale * 100, 50), 200).rounded()) : 100
         self.exportFormat = exportFormat
         showsPrintSize = exportFormat == nil
         super.init(nibName: nil, bundle: nil)
@@ -324,15 +332,30 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
     override func loadView() {
         var rows: [NSView] = []
         if showsPrintSize {
-            let sizeRow = PrintSizeRowView(width: 620)
+            let sizeRow = PrintNumberRowView(
+                width: 620, label: NSLocalizedString("Font Size:", comment: "Print font size field label"),
+                value: pointSize, range: PrintSizeOptions.minimumPointSize...PrintSizeOptions.maximumPointSize,
+                suffix: " " + NSLocalizedString("pt", comment: "Abbreviation for typographic points"))
             sizeRow.onChange = { [weak self] size in
                 guard let self else { return }
                 self.willChangeValue(forKey: "localizedSummaryItems")
                 self.pointSize = size
+                PrintSizeOptions.pointSize = size
                 self.didChangeValue(forKey: "localizedSummaryItems")
                 self.refreshPreview()
             }
             rows.append(sizeRow)
+            let scaleRow = PrintNumberRowView(
+                width: 620, label: NSLocalizedString("Scale:", comment: "Print scale field label"),
+                value: scalePercent, range: 50...200, suffix: "%")
+            scaleRow.onChange = { [weak self] percent in
+                guard let self else { return }
+                self.willChangeValue(forKey: "localizedSummaryItems")
+                self.scalePercent = percent
+                self.didChangeValue(forKey: "localizedSummaryItems")
+                self.refreshPreview()
+            }
+            rows.append(scaleRow)
         }
 
         if let exportFormat {
@@ -386,6 +409,10 @@ private final class PrintSizeAccessoryController: NSViewController, NSPrintPanel
                 .itemName: NSLocalizedString(
                     "Font Size", comment: "Print panel summary item name"),
                 .itemDescription: PrintSizeOptions.localizedLabel(for: pointSize),
+            ])
+            items.append([
+                .itemName: NSLocalizedString("Scale", comment: "Print panel scale summary"),
+                .itemDescription: "\(scalePercent)%",
             ])
         }
         if let exportFormat {
@@ -936,15 +963,19 @@ extension MarkdownWebView {
                 let export = try await captureExportSession(assetBaseURL: assetBaseURL)
                 session = export
                 let info = NSPrintInfo.shared.copy() as? NSPrintInfo ?? NSPrintInfo()
+                info.scalingFactor = 1
                 let paperView = try await export.preparePaper(using: info, pointSize: PrintSizeOptions.pointSize)
-                let operation = makePrintOperation(for: paperView, from: window, printInfo: info)
-                let accessory = PrintSizeAccessoryController()
+                let operation = makePrintOperation(for: paperView, from: window,
+                                                   printInfo: DocumentExportSession.printInfoForPreparedPaper(info))
+                let accessory = PrintSizeAccessoryController(paperScale: info.scalingFactor)
                 accessory.preparePaper = { [weak operation] info, size in
                     let view = try await export.preparePaper(using: info, pointSize: size)
                     operation?.view?.frame = view.bounds
                 }
                 accessory.presentError = { window.presentError($0) }
                 let panel = PaperPrintPanel()
+                // Scale is applied before WebKit paginates, via our accessory.
+                panel.options.remove(.showsScaling)
                 panel.prepare = { try await accessory.prepareForPrinting(using: $0) }
                 panel.addAccessoryController(accessory)
                 panel.options.insert(.showsPreview)

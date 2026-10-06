@@ -369,3 +369,7 @@
 "Right" = "右对齐";
 "Justified" = "两端对齐";
 "Alignment applies to prose in reading view and Quick Look. Automatic follows the document. Code, tables and explicit HTML alignment are preserved." = "对齐方式适用于阅读视图和快速查看中的正文。“自动”遵循文稿的对齐方式。代码、表格和 HTML 中明确指定的对齐方式保持不变。";
+
+/* Paper print scale, applied before pagination. */
+"Scale:" = "缩放:";
+"Scale" = "缩放";

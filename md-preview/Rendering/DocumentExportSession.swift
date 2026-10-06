@@ -9,10 +9,12 @@ final class DocumentExportSession {
     private struct PaperLayout: Equatable {
         let width: CGFloat
         let pointSize: Int
+        let scale: CGFloat
 
         init(info: NSPrintInfo, pointSize: Int) {
             let points = info.paperSize.width - 2 * MarkdownHTML.printPageMarginSidePoints
-            width = points * 96 / 72
+            scale = info.scalingFactor.isFinite && info.scalingFactor > 0 ? info.scalingFactor : 1
+            width = points / scale * 96 / 72
             self.pointSize = pointSize
         }
     }
@@ -79,6 +81,14 @@ final class DocumentExportSession {
         return try await page(for: format).webView
     }
 
+    /// WebKit's native scale tiles the unscaled layout horizontally above 100%.
+    /// Paper preparation applies scale with CSS zoom instead, before pagination.
+    static func printInfoForPreparedPaper(_ info: NSPrintInfo) -> NSPrintInfo {
+        let copy = info.copy() as? NSPrintInfo ?? NSPrintInfo()
+        copy.scalingFactor = 1
+        return copy
+    }
+
     func preparePaper(using info: NSPrintInfo, pointSize: Int) async throws -> WKWebView {
         guard !isClosed else { throw CancellationError() }
         let layout = PaperLayout(info: info, pointSize: pointSize)
@@ -95,13 +105,15 @@ final class DocumentExportSession {
             try Task.checkCancellation()
             let page = try await self.page(for: .paper)
             guard !self.isClosed else { throw CancellationError() }
-            page.webView.setFrameSize(NSSize(width: layout.width, height: self.previewSize.height))
+            page.webView.setFrameSize(NSSize(width: layout.width * layout.scale, height: self.previewSize.height))
             _ = try await page.webView.callAsyncJavaScript("""
+                document.body.style.zoom = '1';
                 document.body.style.width = width + 'px';
                 document.body.style.fontSize = pointSize + 'pt';
                 await document.fonts.ready;
                 \(ExportTableLayout.prepareScript)
-                """, arguments: ["width": layout.width, "pointSize": layout.pointSize],
+                document.body.style.zoom = scale;
+                """, arguments: ["width": layout.width, "pointSize": layout.pointSize, "scale": layout.scale],
                 in: nil, contentWorld: .page)
             try Task.checkCancellation()
             guard !self.isClosed else { throw CancellationError() }

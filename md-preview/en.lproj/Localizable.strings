@@ -369,3 +369,7 @@
 "Right" = "Right";
 "Justified" = "Justified";
 "Alignment applies to prose in reading view and Quick Look. Automatic follows the document. Code, tables and explicit HTML alignment are preserved." = "Alignment applies to prose in reading view and Quick Look. Automatic follows the document. Code, tables and explicit HTML alignment are preserved.";
+
+/* Paper print scale, applied before pagination. */
+"Scale:" = "Scale:";
+"Scale" = "Scale";
