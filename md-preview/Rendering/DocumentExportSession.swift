@@ -53,6 +53,7 @@ final class DocumentExportSession {
             await document.fonts.ready;
             const copy = document.documentElement.cloneNode(true);
             copy.querySelectorAll('script, .md-table-actions').forEach(node => node.remove());
+            copy.querySelectorAll('.md-table-wrap').forEach(wrap => wrap.replaceWith(...wrap.childNodes));
             const checkboxes = document.querySelectorAll('input[type="checkbox"]');
             copy.querySelectorAll('input[type="checkbox"]').forEach((box, index) => {
                 box.toggleAttribute('checked', checkboxes[index].checked);

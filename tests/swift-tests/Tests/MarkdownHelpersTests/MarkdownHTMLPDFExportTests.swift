@@ -102,6 +102,8 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
                 : try await session.webView(for: format)
             let exportedControls = try await view.evaluateJavaScript("document.querySelectorAll('.md-table-actions').length") as? Int
             XCTAssertEqual(exportedControls, 0)
+            let exportedWrappers = try await view.evaluateJavaScript("document.querySelectorAll('.md-table-wrap').length") as? Int
+            XCTAssertEqual(exportedWrappers, 0, "No empty fullscreen-control space in any export format")
             let pdf: PDFDocument
             if format == .png {
                 let data = try await view.pdf(configuration: WKPDFConfiguration())

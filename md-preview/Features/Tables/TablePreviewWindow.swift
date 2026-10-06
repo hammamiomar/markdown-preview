@@ -60,6 +60,7 @@ final class TablePreviewWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        preview?.contentDidReplace = nil
         preview?.clearContent()
         preview = nil
         tableWindow = nil
