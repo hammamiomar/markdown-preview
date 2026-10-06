@@ -373,3 +373,6 @@
 /* Paper print scale, applied before pagination. */
 "Scale:" = "Scale:";
 "Scale" = "Scale";
+
+/* Table fullscreen control. */
+"Expand Table" = "Expand Table";

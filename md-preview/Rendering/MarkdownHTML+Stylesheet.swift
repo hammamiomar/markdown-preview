@@ -16,7 +16,28 @@ nonisolated extension MarkdownHTML {
     /// The class rules live here, not with the in-page highlighter, because a
     /// page whose code arrived highlighted from the renderer never loads that
     /// runtime, yet its spans still need their colors.
-    static let stylesheet = baseStylesheet + "\n" + highlightThemeCSS
+    static let stylesheet = baseStylesheet + "\n" + highlightThemeCSS + "\n" + tableControlsCSS
+
+    static let tableControlsCSS = """
+    .md-table-wrap { position: relative; margin-top: \(largeBlockSpacing)px; padding-top: 28px; }
+    .md-table-wrap > table { margin-top: 0; }
+    .md-table-actions { display: flex; justify-content: flex-end; height: 28px; }
+    .md-table-wrap > .md-table-actions { position: absolute; top: 0; inset-inline-end: 0; }
+    .md-table-expand {
+        appearance: none; border: 0; border-radius: 5px; padding: 3px 7px;
+        background: transparent; color: var(--secondary, var(--text));
+        font: inherit; font-size: 13px; cursor: pointer;
+    }
+    .md-table-expand:hover { background: var(--code-bg); color: var(--text); }
+    .md-table-expand:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    th code, td code, .cm-md-table-cell .cm-md-inline-code { overflow-wrap: inherit; word-break: normal; }
+    html.\(previewPrintClass) .md-table-actions { display: none; }
+    html.\(previewPrintClass) .md-table-wrap { padding-top: 0; }
+    @media print {
+        .md-table-actions { display: none !important; }
+        .md-table-wrap { padding-top: 0; }
+    }
+    """
 
     private static let baseStylesheet = """
     :root {

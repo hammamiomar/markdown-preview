@@ -624,6 +624,10 @@ final class MarkdownWebView: NSView, WKNavigationDelegate {
         #if !QUICK_LOOK_EXTENSION
         case "mermaidPopup":
             presentMermaidPopup(dict)
+        case "tablePopup":
+            guard let markdown = dict["markdown"] as? String else { return }
+            TablePreviewWindow.shared.present(markdown: markdown, title: dict["title"] as? String,
+                                              assetBaseURL: currentAssetBase, relativeTo: window)
         #endif
         case "copyCode":
             guard let text = dict["value"] as? String else { return }

@@ -62,10 +62,17 @@ nonisolated extension MarkdownHTML {
     // Internal so the WebKit regression tests can exercise the exact
     // `MdPreview.update` pipeline shipped by the app with the bundled
     // DOMPurify and morphdom runtimes.
+    #if QUICK_LOOK_EXTENSION
+    private static let tablePopupEnabled = false
+    #else
+    private static let tablePopupEnabled = true
+    #endif
+
     static let hostBridgeScript: String = """
     <script>
     (() => {
         const localized = {
+            expandTable: \(javaScriptStringLiteral(NSLocalizedString("Expand Table", comment: "Open a table in full screen"))),
             wrapCode: \(javaScriptStringLiteral(NSLocalizedString("Wrap code", comment: "Code block wrap button"))),
             unwrapCode: \(javaScriptStringLiteral(NSLocalizedString("Unwrap code", comment: "Code block unwrap button"))),
             copyCode: \(javaScriptStringLiteral(NSLocalizedString("Copy code", comment: "Code block copy button accessibility label"))),
@@ -229,12 +236,50 @@ nonisolated extension MarkdownHTML {
             });
         }
 
+        function decorateTables(root = document) {
+            if (!hasHostBridge || !\(tablePopupEnabled)) return;
+            root.querySelectorAll('table').forEach(table => {
+                if (table.closest('.md-frontmatter') || table.parentElement.closest('table')
+                    || table.parentElement.classList.contains('md-table-wrap')) return;
+                const wrap = document.createElement('div');
+                wrap.className = 'md-table-wrap';
+                table.before(wrap);
+                wrap.append(table);
+                const actions = document.createElement('div');
+                actions.className = 'md-table-actions';
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'md-table-expand';
+                button.textContent = '⛶';
+                button.title = localized.expandTable;
+                button.setAttribute('aria-label', localized.expandTable);
+                actions.append(button);
+                wrap.prepend(actions);
+            });
+        }
+        document.addEventListener('click', event => {
+            const button = event.target.closest('.md-table-expand');
+            if (!button) return;
+            const table = button.closest('.md-table-wrap')?.querySelector('table');
+            if (!table) return;
+            event.preventDefault();
+            const clone = table.cloneNode(true);
+            clone.querySelectorAll('.md-table-actions, .md-code-header').forEach(node => node.remove());
+            let title = '';
+            for (const heading of document.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+                if (heading.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING)
+                    title = heading.textContent.trim();
+                else break;
+            }
+            post({kind: 'tablePopup', markdown: clone.outerHTML, title});
+        });
+
         function selectionFragment(selection) {
             const fragment = document.createDocumentFragment();
             for (let i = 0; i < selection.rangeCount; i += 1) {
                 fragment.appendChild(selection.getRangeAt(i).cloneContents());
             }
-            const buttons = fragment.querySelectorAll('.md-code-header');
+            const buttons = fragment.querySelectorAll('.md-code-header, .md-table-actions');
             buttons.forEach((button) => button.remove());
             return { fragment, removedButtons: buttons.length > 0 };
         }
@@ -715,6 +760,7 @@ nonisolated extension MarkdownHTML {
                     // Pre-shape the incoming tree so the decorators' wrappers
                     // pair one-to-one with the live DOM during the diff.
                     decorateCodeBlocks(next);
+                    decorateTables(next);
                     keyExpensiveBlocks(article);
                     keyExpensiveBlocks(next);
                     morphdom(article, next, MORPH_OPTIONS);
@@ -740,6 +786,7 @@ nonisolated extension MarkdownHTML {
                 // the innerHTML swap leaves fresh undecorated nodes behind.
                 if (!morphed) {
                     decorateCodeBlocks();
+                    decorateTables();
                 }
                 for (const fn of reappliers) {
                     try { fn(); } catch (e) { /* one bad apple shouldn't block others */ }
@@ -769,6 +816,7 @@ nonisolated extension MarkdownHTML {
             perfLog('start (DOM ready)');
             populateFromTemplate();
             decorateCodeBlocks();
+            decorateTables();
             pushHeight();
             try {
                 const ro = new ResizeObserver(pushHeight);

@@ -81,6 +81,44 @@ final class MarkdownHTMLPDFExportTests: XCTestCase {
         }
     }
 
+    func testExpandedTableControlsStayOutOfAllExports() async throws {
+        _ = NSApplication.shared
+        let markdown = "| Module | Notes |\n| --- | --- |\n| `AuthenticationService` | \(longValue) |"
+        for format: DocumentExportSession.Format in [.pdf, .png, .paper] {
+            let html = MarkdownHTML.render(markdown: markdown, allowsScroll: true).html
+            let harness = WebViewLayoutHarness(html: html, width: 500, isEditor: false,
+                                              messageHandler: ExportTestHostMessages())
+            defer { harness.close() }
+            _ = try await harness.layout(texts: [], imageCount: 0)
+            let controls = try await harness.webView.evaluateJavaScript("document.querySelectorAll('.md-table-expand').length") as? Int
+            XCTAssertEqual(controls, 1)
+            let source = try await documentState(harness.webView)
+            let session = try await DocumentExportSession.capture(from: harness.webView)
+            defer { session.close() }
+            let info = printInfo()
+            info.scalingFactor = format == .paper ? 1.25 : 1
+            let view = format == .paper
+                ? try await session.preparePaper(using: info, pointSize: 12)
+                : try await session.webView(for: format)
+            let exportedControls = try await view.evaluateJavaScript("document.querySelectorAll('.md-table-actions').length") as? Int
+            XCTAssertEqual(exportedControls, 0)
+            let pdf: PDFDocument
+            if format == .png {
+                let data = try await view.pdf(configuration: WKPDFConfiguration())
+                pdf = try XCTUnwrap(PDFDocument(data: data))
+            } else {
+                pdf = try await printPDF(view, session: session,
+                                         info: DocumentExportSession.printInfoForPreparedPaper(info),
+                                         name: "table-controls-\(format)")
+            }
+            assertWholeWords(["Module", "AuthenticationService"], in: pdf)
+            assertCompleteText([longValue], in: pdf)
+            assertTextInsidePages(pdf, paperMargins: format == .paper)
+            let after = try await documentState(harness.webView)
+            XCTAssertEqual(after, source)
+        }
+    }
+
     func testOverlappingPNGSavesMatchACompletedExport() async throws {
         let harness = makeHarness(markdown: "| Category | Value |\n| --- | --- |\n| Static | \(longValue) |")
         defer { harness.close() }
@@ -697,4 +735,9 @@ private final class CancellingPrintPanel: NSPrintPanel {
             handler?(.cancelled)
         }
     }
+}
+
+@MainActor
+private final class ExportTestHostMessages: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {}
 }
